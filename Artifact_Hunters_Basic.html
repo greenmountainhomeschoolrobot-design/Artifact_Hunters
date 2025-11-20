@@ -1,0 +1,754 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Zombs Royale — Canvas Start (Full Build)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  :root{ --acc:#ffd27f; --bg:#0b2a1a; --ui-text:#eef3f7; }
+  html,body{height:100%;margin:0;background:var(--bg);font-family:Inter,system-ui,-apple-system,"Segoe UI",Roboto,Arial;color:var(--ui-text);}
+  canvas{display:block; width:100vw; height:100vh;}
+  #deleteWeaponBtn{ position: fixed; top:12px; right:12px; z-index:20; background:#b33; color:white; border:none; padding:8px 12px; border-radius:8px; cursor:pointer; }
+  /* HUD - still HTML overlay for clarity */
+  #hud{ position:fixed; left:14px; top:12px; z-index:18; background:rgba(0,0,0,0.32); padding:8px 12px; border-radius:10px; display:flex; gap:12px; align-items:center; font-weight:700; }
+  #reloadWrap{ width:200px; height:12px; background: rgba(255,255,255,0.04); border-radius:8px; overflow:hidden; }
+  #reloadBar{ height:100%; width:0%; background: linear-gradient(90deg, var(--acc), #ffb86b); transition: width 40ms linear; }
+  #weaponBar{ position:fixed; left:50%; transform:translateX(-50%); bottom:14px; z-index:18; display:flex; gap:8px; padding:8px; border-radius:12px; background: rgba(0,0,0,0.28); }
+  .slot{ width:88px; height:40px; display:flex; gap:8px; align-items:center; padding:6px; border-radius:8px; color:white; cursor:pointer; background:rgba(255,255,255,0.03); font-weight:700; font-size:12px; }
+  .slot.active{ outline:2px solid var(--acc); background:linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.02)); }
+  .slot.locked{ opacity:0.26; cursor:default; filter:grayscale(0.5); }
+  #quizOverlay{ position:fixed; inset:0; display:flex; align-items:center; justify-content:center; z-index:30; visibility:hidden; opacity:0; transition:opacity 160ms; }
+  #quizOverlay.show{ visibility:visible; opacity:1; }
+  #quizCard{ width:min(980px,94%); background:#fff; color:#111; border-radius:12px; padding:18px; box-shadow:0 12px 50px rgba(0,0,0,0.6); font-family: Georgia, "Times New Roman", serif; }
+  .qAns{ background:#fff; padding:10px 12px; border-radius:8px; margin:8px 0; cursor:pointer; font-size:16px; display:flex; gap:12px; align-items:center; }
+  .qAns.correct{ background:#dfffdc; outline:2px solid #4caf50; }
+  .qAns.wrong{ background:#ffdede; outline:2px solid #e04444; }
+  #gameOver{ position:fixed; inset:0; display:flex; align-items:center; justify-content:center; z-index:25; visibility:hidden; opacity:0; transition:opacity 180ms; }
+  #gameOver.show{ visibility:visible; opacity:1; }
+  #gameOverPanel{ background:#fff; color:#111; padding:18px; border-radius:10px; text-align:center; box-shadow:0 10px 30px rgba(0,0,0,0.5); }
+  button{ cursor:pointer; }
+</style>
+</head>
+<body>
+<button id="deleteWeaponBtn" title="Delete currently selected weapon (permanent)">🗑 Delete Weapon</button>
+
+<div id="hud" aria-hidden>
+  <div>Lives: <span id="livesVal">5.0</span></div>
+  <div>Wave: <span id="waveVal">1</span></div>
+  <div>Enemies: <span id="enemyVal">0</span></div>
+  <div>Weapon: <span id="weaponVal">Pistol</span></div>
+  <div style="display:flex;flex-direction:column;gap:4px;">
+    <div style="font-size:11px;color:#ddd">Reload</div>
+    <div id="reloadWrap"><div id="reloadBar"></div></div>
+  </div>
+</div>
+
+<div id="weaponBar" role="toolbar" aria-label="Weapons"></div>
+
+<!-- Quiz overlay -->
+<div id="quizOverlay"><div id="quizCard">
+  <div style="font-weight:900; font-size:14px; margin-bottom:8px;">Archaeology Challenge — Answer 2 correctly to continue</div>
+  <div id="qText" style="min-height:64px; font-size:18px; margin-bottom:8px;"></div>
+  <div id="answers"></div>
+  <div style="text-align:right; margin-top:8px;">Correct: <span id="quizCorrect">0</span>/2</div>
+</div></div>
+
+<!-- Game Over -->
+<div id="gameOver"><div id="gameOverPanel">
+  <h2>GAME OVER</h2>
+  <p id="gameOverText">You reached Wave 1</p>
+  <button id="restartBtn">Restart</button>
+</div></div>
+
+<canvas id="gameCanvas"></canvas>
+
+<script>
+/* ========= Basic helpers ========= */
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+function resize(){ canvas.width = innerWidth; canvas.height = innerHeight; }
+window.addEventListener('resize', resize); resize();
+
+const hudEls = {
+  lives: document.getElementById('livesVal'),
+  wave: document.getElementById('waveVal'),
+  enemies: document.getElementById('enemyVal'),
+  weapon: document.getElementById('weaponVal'),
+  reloadBar: document.getElementById('reloadBar')
+};
+const deleteBtn = document.getElementById('deleteWeaponBtn');
+const weaponBar = document.getElementById('weaponBar');
+const quizOverlay = document.getElementById('quizOverlay');
+const qText = document.getElementById('qText');
+const answersDiv = document.getElementById('answers');
+const quizCorrectEl = document.getElementById('quizCorrect');
+const gameOverUI = document.getElementById('gameOver');
+const gameOverText = document.getElementById('gameOverText');
+const restartBtn = document.getElementById('restartBtn');
+
+function rand(min,max){ return Math.random()*(max-min)+min; }
+function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+function now(){ return performance.now(); }
+
+function beep(freq=440, time=0.06, vol=0.06){
+  try{
+    const ac = window.audioCtx || (window.audioCtx = new (window.AudioContext || window.webkitAudioContext)());
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type='sine'; o.frequency.value=freq; g.gain.value=vol;
+    o.connect(g); g.connect(ac.destination);
+    o.start(); setTimeout(()=>{ o.stop(); o.disconnect(); g.disconnect(); }, time*1000);
+  }catch(e){}
+}
+
+/* ========= WORLD ========= */
+const MAP_W = 3000, MAP_H = 3000;
+let camX = 0, camY = 0;
+function updateCamera(){ camX = clamp(player.x - canvas.width/2, 0, MAP_W - canvas.width); camY = clamp(player.y - canvas.height/2, 0, MAP_H - canvas.height); }
+function screenToWorld(sx, sy){ return { x: camX + sx, y: camY + sy }; }
+
+/* ========= STATE ========= */
+let running = false;
+let started = false; // canvas start screen state
+let quizActive = false;
+let pausedForQuiz = false;
+let wave = 1;
+let highestWave = 1;
+
+/* ========= Player ========= */
+const player = { x: MAP_W/2, y: MAP_H/2, r:18, speed:3.0, lives:5, maxLives:5, lastShot:0 };
+
+/* ========= Input ========= */
+let keys = {}, mouse = { x:0, y:0 }, mouseDown = false;
+window.addEventListener('keydown', e=>{ keys[e.key.toLowerCase()] = true; if(e.key === ' ') { e.preventDefault(); attemptWhip(); } if(e.key.toLowerCase() === 'y'){ deleteCurrentWeapon(); } });
+window.addEventListener('keyup', e=> keys[e.key.toLowerCase()] = false);
+canvas.addEventListener('mousemove', e=> { mouse.x = e.clientX; mouse.y = e.clientY; });
+canvas.addEventListener('mousedown', e=> { mouseDown = true; if(!currentWeaponDef.auto) fireWeapon(); handleStartClick(e); handleCrateClick(e); });
+canvas.addEventListener('mouseup', ()=> mouseDown = false);
+
+/* ========= Entities ========= */
+let bullets = [], enemyBullets = [], enemies = [], crates = [], healthPacks = [], scenery = [], explosions = [];
+
+/* ========= Weapons ========= */
+/* slowed: SLOW_SP and reload multiplier */
+const SLOW_SP = 0.72;
+const RELOAD_MULT = 1.3;
+
+const BASE_WEAPONS = [
+  { id:"Pistol", reload:450, dmg:1.0, spd:12, auto:false, icon:"🔫" },
+  { id:"Revolver", reload:650, dmg:2.0, spd:13, auto:false, icon:"🧭" },
+  { id:"SMG", reload:90, dmg:0.28, spd:12, auto:true, icon:"🔵" },
+  { id:"LMG", reload:70, dmg:0.22, spd:13, auto:true, icon:"🟩" },
+  { id:"Burst Rifle", reload:900, dmg:1.0, spd:14, burst:3, icon:"🌩️" },
+  { id:"Double-Shotgun", reload:900, dmg:0.9, spd:9, pellets:7, spread:0.45, icon:"💥" },
+  { id:"Flamethrower", reload:70, dmg:0.18, spd:3.6, auto:true, flame:true, icon:"🔥" },
+  { id:"Grenade Launcher", reload:1400, dmg:5.0, spd:7, explosion:140, icon:"💣" },
+  { id:"Rocket Launcher", reload:1700, dmg:6.5, spd:7.5, explosion:180, icon:"🚀" },
+  { id:"Crossbow", reload:1100, dmg:2.1, spd:16, icon:"🏹" },
+  { id:"Dual Pistols", reload:380, dmg:0.95, spd:12, dual:true, icon:"🔫🔫" },
+  { id:"Plasma Rifle", reload:300, dmg:1.2, spd:14, auto:true, icon:"🔮" },
+  { id:"Laser Minigun", reload:70, dmg:0.26, spd:18, auto:true, visual:"beam", icon:"⚡" },
+  { id:"Railgun", reload:2200, dmg:9.0, spd:40, piercing:true, icon:"🔵" },
+  { id:"Pulse Cannon", reload:950, dmg:1.8, spd:14, pellets:3, spread:0.22, icon:"💫" },
+  { id:"Shock Blaster", reload:480, dmg:1.4, spd:13, chain:true, icon:"🔋" },
+  { id:"Cairo Gun", reload:420, dmg:0.6, spd:10, slow:true, icon:"❄️" },
+  { id:"Gravity Gun", reload:1200, dmg:0, spd:16, pull:true, icon:"🧲" },
+  { id:"Ion Cannon", reload:2400, dmg:7.0, spd:18, piercing:true, icon:"✨" },
+  { id:"Nano Swarm", reload:1800, dmg:0.2, spd:6, swarm:true, explosion:120, icon:"🪲" },
+  { id:"Photon Sniper", reload:2600, dmg:11, spd:44, piercing:true, icon:"🎯" },
+  { id:"Banana Gun", reload:600, dmg:1.0, spd:16, banana:true, icon:"🍌" },
+  { id:"Paintball", reload:260, dmg:0.5, spd:11, colorful:true, icon:"🎨" },
+  { id:"Bubble Gun", reload:700, dmg:0.5, spd:4.5, bubble:true, icon:"🫧" },
+  { id:"Rubber Chicken", reload:420, dmg:2.3, melee:true, icon:"🐔" },
+  { id:"Boomerang", reload:1100, dmg:2.0, spd:16, return:true, icon:"🪃" },
+  { id:"Slime Launcher", reload:820, dmg:1.0, spd:7, slow:true, icon:"🟩" },
+  { id:"Fireworks", reload:1500, dmg:7.5, spd:9, explosion:220, icon:"🎆" },
+  { id:"Confetti", reload:600, dmg:0.6, spd:9, colorful:true, icon:"🎉" },
+  { id:"Boxing Gloves", reload:500, dmg:1.6, melee:true, icon:"🥊" },
+  { id:"Trombone Gun", reload:1000, dmg:1.2, spd:9, notes:true, icon:"🎺" }
+];
+
+const WEAPONS = BASE_WEAPONS.map(w => ({ ...w, spd: (w.spd||10) * SLOW_SP, reload: Math.round((w.reload||600) * RELOAD_MULT) }));
+
+/* Inventory: pistol default */
+let inventory = ["Pistol"];
+let currentWeaponIndex = 0;
+let currentWeaponDef = WEAPONS.find(w => w.id === "Pistol");
+
+/* ========= Scenery, crates, health ========= */
+function spawnScenery(){ scenery = []; for(let i=0;i<140;i++){ const t=Math.random(); scenery.push({ x:rand(80,MAP_W-80), y:rand(80,MAP_H-80), type:t<0.6?'bush':(t<0.85?'rock':'tree'), r:rand(10,28) }); } }
+function spawnCrate(x,y,weapon){ crates.push({ x,y, size:36, opened:false, weapon: weapon || WEAPONS[Math.floor(Math.random()*WEAPONS.length)].id }); }
+function spawnHealth(x,y){ healthPacks.push({ x,y, r:10 }); }
+
+/* ========= Enemy spawn ========= */
+function spawnWave(n){
+  enemies = [];
+  const total = 4 + n * 3;
+  for(let i=0;i<total;i++){
+    const r = Math.random();
+    let type='charger', color='#9a9a9a', lives=2;
+    if(r < 0.22 && n > 1){ type='shooter'; color='#9a9a9a'; lives = 3; }
+    else if(n >= 7 && r < 0.36){ type='elite'; color='#8b5a1a'; lives = 5; }
+    else { type='charger'; color='#9a9a9a'; lives = 2; }
+    enemies.push({ x:rand(80,MAP_W-80), y:rand(80,MAP_H-80), r:16, type, color, lives, maxLives:lives, cooldown: Math.floor(rand(90,240)), frozenUntil:0, pullTarget:null });
+  }
+  crates = [];
+  for(let i=0;i<Math.min(6,2 + Math.floor(n/2));i++) spawnCrate(rand(80,MAP_W-80), rand(80,MAP_H-80));
+}
+
+/* ========= Projectiles helper ========= */
+function spawnProjectile(x,y,angle,opts){
+  const speed = opts.spd || 8;
+  bullets.push(Object.assign({
+    x,y,
+    dx: Math.cos(angle) * speed,
+    dy: Math.sin(angle) * speed,
+    r: opts.r || 4,
+    dmg: opts.dmg || 1,
+    color: opts.color || '#111',
+    pierce: !!opts.pierce,
+    explosion: opts.explosion || 0,
+    special: opts.special || null,
+    created: now(),
+    life: opts.life || 4000,
+    owner: 'player'
+  }, opts));
+}
+
+/* ========= Fire weapon ========= */
+function fireWeapon(){
+  if(!running || pausedForQuiz) return;
+  const w = currentWeaponDef;
+  const t = now();
+  if(t - player.lastShot < w.reload) return;
+  player.lastShot = t;
+  const world = screenToWorld(mouse.x, mouse.y);
+  const angle = Math.atan2(world.y - player.y, world.x - player.x);
+
+  if(w.burst){
+    for(let i=0;i<w.burst;i++){ setTimeout(()=> spawnProjectile(player.x, player.y, angle, { spd:w.spd, r:5, dmg:w.dmg, color:'#333' }), i*100); }
+  } else if(w.dual){
+    spawnProjectile(player.x, player.y, angle+0.06, { spd:w.spd, r:5, dmg:w.dmg });
+    spawnProjectile(player.x, player.y, angle-0.06, { spd:w.spd, r:5, dmg:w.dmg });
+  } else if(w.pellets){
+    for(let i=0;i<w.pellets;i++){
+      const off = (i - (w.pellets-1)/2) * (w.spread || 0.4)/Math.max(1,w.pellets-1);
+      spawnProjectile(player.x, player.y, angle+off, { spd:w.spd, r:4, dmg:w.dmg });
+    }
+  } else if(w.banana){
+    spawnProjectile(player.x, player.y, angle, { spd:w.spd, r:6, dmg:w.dmg, color:'yellow', special:'banana' });
+  } else if(w.flame){
+    const jitter = (Math.random()-0.5)*0.28;
+    spawnProjectile(player.x + Math.cos(angle)*12, player.y + Math.sin(angle)*12, angle + jitter, { spd:w.spd + rand(-0.6,0.6), r:6, dmg:w.dmg, color:'#ff5a5a', special:'flame', life:800 });
+  } else if(w.explosion){
+    spawnProjectile(player.x, player.y, angle, { spd:w.spd, r:6, dmg:w.dmg, explosion:w.explosion, color:'#ff9b6b' });
+  } else if(w.pull){
+    spawnProjectile(player.x, player.y, angle, { spd:w.spd, r:6, dmg:w.dmg, special:'gravity', color:'#666' });
+  } else if(w.id === "Cairo Gun"){
+    spawnProjectile(player.x, player.y, angle, { spd:w.spd, r:6, dmg:w.dmg, special:'cairo', color:'#dff' });
+  } else {
+    spawnProjectile(player.x, player.y, angle, { spd:w.spd, r:4, dmg:w.dmg, color:'#222', pierce:!!w.piercing });
+  }
+}
+
+/* ========= Whip ========= */
+let whip = { last:0, cooldown:1500, range:120, dmg:1.0 };
+function attemptWhip(){
+  if(!running || pausedForQuiz) return;
+  const t = now();
+  if(t - whip.last < whip.cooldown) return;
+  whip.last = t;
+  const world = screenToWorld(mouse.x, mouse.y);
+  const ang = Math.atan2(world.y - player.y, world.x - player.x);
+  let best=null, bestD=1e9;
+  for(const e of enemies){
+    const dx = e.x - player.x, dy = e.y - player.y; const d = Math.hypot(dx,dy);
+    if(d > whip.range) continue;
+    const a = Math.atan2(dy,dx);
+    const diff = Math.abs(normalizeAngle(a - ang));
+    if(diff < Math.PI*0.35 && d < bestD){ best = e; bestD = d; }
+  }
+  if(best){
+    best.lives -= whip.dmg;
+    best.x += (player.x - best.x)*0.45;
+    best.y += (player.y - best.y)*0.45;
+    beep(760,0.04,0.06);
+  } else beep(420,0.03,0.04);
+}
+function normalizeAngle(a){ while(a>Math.PI) a-=Math.PI*2; while(a<-Math.PI) a+=Math.PI*2; return a; }
+
+/* ========= Explosion scaled down ========= */
+function makeExplosion(x,y,r,dmg,color){
+  const scale = 0.5; // 50% power scaling as requested
+  const rS = r*scale;
+  const dmgS = dmg*scale;
+  explosions.push({ x,y,r:rS,dmg:dmgS, color, t:now() });
+  for(const e of enemies){
+    const d = Math.hypot(e.x - x, e.y - y);
+    if(d < rS + e.r) e.lives -= dmgS * (1 - d/(rS + e.r));
+  }
+}
+
+/* ========= Update loop ========= */
+function update(dt){
+  if(!running) return;
+  if(quizActive) return;
+
+  // movement
+  if(keys['w']||keys['arrowup']) player.y -= player.speed;
+  if(keys['s']||keys['arrowdown']) player.y += player.speed;
+  if(keys['a']||keys['arrowleft']) player.x -= player.speed;
+  if(keys['d']||keys['arrowright']) player.x += player.speed;
+  player.x = clamp(player.x, 20, MAP_W-20); player.y = clamp(player.y, 20, MAP_H-20);
+
+  // auto fire
+  if(mouseDown && currentWeaponDef.auto && now() - player.lastShot >= currentWeaponDef.reload) fireWeapon();
+
+  // bullets update
+  for(let i=bullets.length-1;i>=0;i--){
+    const b = bullets[i];
+    b.x += b.dx; b.y += b.dy;
+    if(b.x < -300 || b.x > MAP_W+300 || b.y < -300 || b.y > MAP_H+300 || (b.life && now() - b.created > b.life)){ bullets.splice(i,1); continue; }
+    for(let j=enemies.length-1;j>=0;j--){
+      const e = enemies[j];
+      const d = Math.hypot(e.x - b.x, e.y - b.y);
+      if(d < e.r + (b.r||4)){
+        if(b.special === 'gravity'){
+          e.lives -= b.dmg || 1;
+          const radius = 160;
+          const pullEnd = now() + 1000;
+          for(const oe of enemies) if(oe !== e){
+            const dd = Math.hypot(oe.x - e.x, oe.y - e.y);
+            if(dd < radius + oe.r) oe.pullTarget = { x:e.x, y:e.y, until: pullEnd, strength: 0.7 };
+          }
+          explosions.push({ x:e.x, y:e.y, r:40, color:'#888', t:now() });
+          bullets.splice(i,1); break;
+        }
+        if(b.special === 'cairo'){
+          e.lives -= b.dmg || 1;
+          e.frozenUntil = now() + 1000;
+          explosions.push({ x:e.x, y:e.y, r:32, color:'#cde', t:now() });
+          bullets.splice(i,1); break;
+        }
+        if(b.explosion && !b._exploded){
+          b._exploded = true;
+          makeExplosion(b.x,b.y,b.explosion,b.dmg*1.4,'#ff9b6b');
+          bullets.splice(i,1); break;
+        }
+        e.lives -= b.dmg || 1;
+        if(!b.pierce) bullets.splice(i,1);
+        break;
+      }
+    }
+  }
+
+  // apply pulls to enemies
+  for(const e of enemies){
+    if(e.pullTarget && now() < e.pullTarget.until){
+      const tx = e.pullTarget.x - e.x, ty = e.pullTarget.y - e.y, d = Math.hypot(tx,ty);
+      if(d > 1) { e.x += (tx/d) * e.pullTarget.strength * 2.2; e.y += (ty/d) * e.pullTarget.strength * 2.2; }
+    } else e.pullTarget = null;
+  }
+
+  // enemy bullets
+  for(let i=enemyBullets.length-1;i>=0;i--){
+    const eb = enemyBullets[i];
+    eb.x += eb.dx; eb.y += eb.dy;
+    if(Math.hypot(eb.x - player.x, eb.y - player.y) < eb.r + player.r){ player.lives -= eb.dmg || 1; enemyBullets.splice(i,1); continue; }
+    if(eb.x < -300 || eb.x > MAP_W+300 || eb.y < -300 || eb.y > MAP_H+300) enemyBullets.splice(i,1);
+  }
+
+  // enemies AI
+  for(const e of enemies){
+    if(now() < (e.frozenUntil||0)) continue;
+    let avoidX=0, avoidY=0;
+    for(const s of scenery){
+      const dx = s.x - e.x, dy = s.y - e.y, d = Math.hypot(dx,dy), minD = (s.r||12) + e.r + 6;
+      if(d < minD && d > 0){ avoidX += (e.x - s.x)/d * (minD - d); avoidY += (e.y - s.y)/d * (minD - d); }
+    }
+    const dx = player.x - e.x, dy = player.y - e.y, dist = Math.hypot(dx,dy);
+    const ang = Math.atan2(dy,dx);
+    const chargerSpeed = 1.6 * 0.7;
+    const shooterSpeed = 1.0 * 0.7;
+    if(e.type === 'shooter'){
+      if(dist > 240) { e.x += Math.cos(ang) * shooterSpeed; e.y += Math.sin(ang) * shooterSpeed; }
+      else if(dist < 140) { e.x -= Math.cos(ang) * (shooterSpeed*0.6); e.y -= Math.sin(ang) * (shooterSpeed*0.6); }
+      const strA = ang + Math.PI/2 * (e.strafeDir||1);
+      e.x += Math.cos(strA) * 0.5; e.y += Math.sin(strA) * 0.5;
+      e.x += avoidX * 0.03; e.y += avoidY * 0.03;
+      e.cooldown--;
+      if(e.cooldown <= 0){
+        const inacc = (wave < 7) ? ((Math.random()-0.5)*0.45) : ((Math.random()-0.5)*0.18);
+        const spd = (wave < 7) ? 1.6 * 0.7 : (wave < 12 ? 2.6 * 0.7 : 3.8 * 0.7);
+        const final = ang + inacc;
+        enemyBullets.push({ x:e.x, y:e.y, dx:Math.cos(final)*spd, dy:Math.sin(final)*spd, r:4, dmg:1 });
+        e.cooldown = Math.floor(rand(120,220));
+      }
+    } else {
+      e.x += Math.cos(ang) * chargerSpeed; e.y += Math.sin(ang) * chargerSpeed;
+      e.x += avoidX * 0.03; e.y += avoidY * 0.03;
+    }
+    if(Math.hypot(player.x - e.x, player.y - e.y) < player.r + e.r){
+      player.lives -= 0.6; e.lives = 0;
+    }
+  }
+
+  // remove dead enemies
+  for(let i=enemies.length-1;i>=0;i--){
+    if(enemies[i].lives <= 0){
+      if(Math.random() < 0.12) spawnHealth(enemies[i].x, enemies[i].y);
+      enemies.splice(i,1);
+    }
+  }
+
+  // crate pickup when colliding
+  for(let i=crates.length-1;i>=0;i--){
+    const c = crates[i];
+    if(!c.opened && Math.hypot(c.x - player.x, c.y - player.y) < player.r + c.size/2){
+      c.opened = true;
+      const wep = c.weapon;
+      if(inventory.length < 6){ inventory.push(wep); currentWeaponIndex = inventory.length-1; currentWeaponDef = WEAPONS.find(w=>w.id===inventory[currentWeaponIndex]); updateWeaponBar(); }
+      else { spawnCrate(player.x + rand(-30,30), player.y + rand(-30,30), wep); }
+    }
+  }
+
+  // health packs
+  for(let i=healthPacks.length-1;i>=0;i--){
+    const h = healthPacks[i];
+    if(Math.hypot(player.x - h.x, player.y - h.y) < player.r + h.r){
+      player.lives = clamp(player.lives + 1, 0, player.maxLives);
+      healthPacks.splice(i,1); beep(900,0.06,0.07);
+    }
+  }
+
+  // wave cleared -> next wave + quiz trigger every 2 waves
+  if(enemies.length === 0 && running){
+    wave++; highestWave = Math.max(highestWave, wave);
+    spawnWave(wave);
+    if((wave-1) % 2 === 0){ setTimeout(()=> startQuiz(), 700); }
+  }
+
+  updateCamera();
+  hudEls.lives.innerText = player.lives.toFixed(1);
+  hudEls.wave.innerText = wave;
+  hudEls.enemies.innerText = enemies.length;
+  hudEls.weapon.innerText = inventory[currentWeaponIndex] || 'None';
+
+  const elapsed = now() - player.lastShot;
+  const reload = currentWeaponDef.reload || 1;
+  const progress = clamp(elapsed / reload, 0, 1);
+  hudEls.reloadBar.style.width = (progress*100) + '%';
+
+  if(player.lives <= 0){ running = false; showGameOver(); }
+}
+
+/* ========= Draw ========= */
+function draw(){
+  // whole-screen background
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle = '#2f6b48'; ctx.fillRect(0,0,canvas.width,canvas.height);
+
+  // draw world (camera transform)
+  ctx.save(); ctx.translate(-camX, -camY);
+
+  // subtle grid/texture
+  for(let gx=-200; gx<MAP_W+200; gx+=200){
+    for(let gy=-200; gy<MAP_H+200; gy+=200){
+      ctx.fillStyle='rgba(255,255,255,0.02)'; ctx.beginPath(); ctx.ellipse(gx+40, gy+40, 80, 36, 0, 0, Math.PI*2); ctx.fill();
+    }
+  }
+
+  // scenery
+  for(const s of scenery){
+    if(s.type === 'bush'){ ctx.fillStyle='#245f36'; ctx.beginPath(); ctx.ellipse(s.x, s.y, s.r+8, s.r+6, 0, 0, Math.PI*2); ctx.fill(); ctx.fillStyle='#2fa455'; ctx.beginPath(); ctx.ellipse(s.x-2, s.y-2, s.r, s.r*0.9, 0, 0, Math.PI*2); ctx.fill(); }
+    else if(s.type === 'rock'){ ctx.fillStyle='#6b6b6b'; ctx.beginPath(); ctx.ellipse(s.x, s.y, s.r+6, s.r*0.66, 0, 0, Math.PI*2); ctx.fill(); }
+    else { ctx.fillStyle='#1d7a3b'; ctx.beginPath(); ctx.ellipse(s.x, s.y, s.r+10, s.r*1.1, 0, 0, Math.PI*2); ctx.fill(); }
+  }
+
+  // crates
+  for(const c of crates){
+    if(!c.opened){ ctx.fillStyle='#c79e3a'; ctx.fillRect(c.x - c.size/2, c.y - c.size/2, c.size, c.size); ctx.strokeStyle='#7b5a1a'; ctx.strokeRect(c.x - c.size/2, c.y - c.size/2, c.size, c.size); }
+    else { ctx.fillStyle='rgba(200,160,60,0.35)'; ctx.beginPath(); ctx.arc(c.x, c.y, 8, 0, Math.PI*2); ctx.fill(); }
+  }
+
+  // health packs
+  for(const h of healthPacks){ ctx.fillStyle='#2eb14d'; ctx.fillRect(h.x-8, h.y-8, 16, 16); ctx.fillStyle='#fff'; ctx.fillRect(h.x-3, h.y-1, 6, 2); ctx.fillRect(h.x-1, h.y-3, 2, 6); }
+
+  // enemies
+  for(const e of enemies){
+    ctx.fillStyle = e.color || '#9a9a9a'; ctx.beginPath(); ctx.arc(e.x, e.y, e.r, 0, Math.PI*2); ctx.fill();
+    drawStahlhelm(e.x, e.y - e.r*0.45, e.r*0.95, '#555');
+    ctx.fillStyle = '#222'; ctx.fillRect(e.x - 18, e.y - 26, 36, 6);
+    ctx.fillStyle = '#8bf57a'; ctx.fillRect(e.x - 18, e.y - 26, Math.max(0,(e.lives/e.maxLives)*36), 6);
+    if(now() < (e.frozenUntil || 0)){ ctx.fillStyle = 'rgba(160,220,255,0.45)'; ctx.beginPath(); ctx.arc(e.x, e.y, e.r+4, 0, Math.PI*2); ctx.fill(); }
+  }
+
+  // enemy bullets
+  for(const eb of enemyBullets){ ctx.fillStyle = eb.orb ? '#b35cff' : '#ff9b6b'; ctx.beginPath(); ctx.arc(eb.x, eb.y, eb.r || 4, 0, Math.PI*2); ctx.fill(); }
+
+  // player
+  ctx.fillStyle = '#2db4ff'; ctx.beginPath(); ctx.arc(player.x, player.y, player.r, 0, Math.PI*2); ctx.fill();
+  drawPlayerWeaponModel();
+
+  // bullets
+  for(const b of bullets){
+    if(b.special === 'banana'){ ctx.save(); ctx.translate(b.x,b.y); ctx.rotate(Math.atan2(b.dy,b.dx)); ctx.strokeStyle='gold'; ctx.lineWidth=4; ctx.beginPath(); ctx.arc(0,0,8,Math.PI*0.6,Math.PI*1.4); ctx.stroke(); ctx.restore(); }
+    else if(b.special === 'flame'){ ctx.fillStyle = '#ff5a5a'; ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI*2); ctx.fill(); }
+    else if(b.special === 'cairo'){ ctx.fillStyle = '#dff'; ctx.beginPath(); ctx.moveTo(b.x, b.y-6); ctx.lineTo(b.x+5, b.y); ctx.lineTo(b.x, b.y+6); ctx.lineTo(b.x-5, b.y); ctx.closePath(); ctx.fill(); }
+    else if(b.special === 'gravity'){ ctx.fillStyle = '#666'; ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI*2); ctx.fill(); }
+    else { ctx.fillStyle = b.color || '#111'; ctx.beginPath(); ctx.arc(b.x, b.y, b.r || 4, 0, Math.PI*2); ctx.fill(); }
+  }
+
+  // explosions
+  for(const ex of explosions){
+    const t = (now() - ex.t) / 1000;
+    if(t < 1){ const radius = ex.r * (0.6 + 1.3*t); ctx.globalAlpha = 1 - t; ctx.fillStyle = ex.color || '#ffb07a'; ctx.beginPath(); ctx.arc(ex.x, ex.y, radius, 0, Math.PI*2); ctx.fill(); ctx.globalAlpha = 1; }
+  }
+
+  ctx.restore();
+
+  // if not started: draw canvas start screen UI (Minimal Sleek UI)
+  if(!started){
+    drawStartScreen();
+  }
+}
+
+/* draw start screen - option 2 (minimal sleek) */
+function drawStartScreen(){
+  const cx = canvas.width/2, cy = canvas.height/2;
+  // dark translucent overlay
+  ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0,0,canvas.width,canvas.height);
+  // big title
+  ctx.fillStyle = '#fff'; ctx.textAlign='center';
+  ctx.font = 'bold 42px Inter, sans-serif'; ctx.fillText('YOU HAVE THE VALUABLE ARTIFACT', cx, cy - 90);
+  ctx.font = '16px Inter, sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.9)';
+  ctx.fillText('Protect it. Survive waves. Every 2 waves you must answer archaeology questions to continue.', cx, cy - 56);
+
+  // button
+  const bw = 300, bh = 72;
+  const bx = cx - bw/2, by = cy - bh/2 + 40;
+  // button box
+  ctx.fillStyle = '#111'; ctx.globalAlpha = 0.88; roundRect(ctx, bx, by, bw, bh, 12, true, false);
+  // gradient accent
+  const g = ctx.createLinearGradient(bx, by, bx+bw, by+bh); g.addColorStop(0, '#ffd27f'); g.addColorStop(1, '#ffb86b');
+  ctx.fillStyle = g; ctx.globalAlpha = 0.12; roundRect(ctx, bx+4, by+4, bw-8, bh-8, 10, true, false);
+  // button text
+  ctx.font = 'bold 28px Inter, sans-serif'; ctx.fillStyle = '#fff'; ctx.globalAlpha = 1; ctx.fillText('START GAME', cx, by + bh/2 + 10);
+
+  // small hint
+  ctx.font = '12px Inter, sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.66)'; ctx.fillText('Click the button to start — keyboard: WASD move, mouse aim, click to shoot. Press Y to delete selected weapon.', cx, by + bh + 36);
+
+  // save button rect for click detection
+  startButtonRect = { x: bx, y: by, w: bw, h: bh };
+}
+function roundRect(ctx, x, y, w, h, r, fill, stroke){
+  ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
+  if(fill) ctx.fill(); if(stroke) ctx.stroke();
+}
+
+/* detect start click and crate clicks */
+let startButtonRect = null;
+function handleStartClick(e){
+  if(started) return;
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  if(startButtonRect && mx >= startButtonRect.x && mx <= startButtonRect.x + startButtonRect.w && my >= startButtonRect.y && my <= startButtonRect.y + startButtonRect.h){
+    // start game
+    started = true; running = true;
+    player.x = MAP_W/2; player.y = MAP_H/2; player.lives = player.maxLives; wave = 1; highestWave = 1;
+    spawnScenery(); spawnWave(wave); updateWeaponBar();
+    try{ /* resume audio context if needed */ if(window.audioCtx && window.audioCtx.state === 'suspended') window.audioCtx.resume(); } catch(e){}
+    beep(880,0.08,0.08);
+  }
+}
+
+/* detect clicking a crate (works even when started) */
+function handleCrateClick(e){
+  if(!started) return;
+  const world = screenToWorld(e.clientX, e.clientY);
+  for(const c of crates){
+    if(!c.opened && Math.hypot(c.x - world.x, c.y - world.y) < 40){
+      c.opened = true;
+      const wep = c.weapon;
+      if(inventory.length < 6){ inventory.push(wep); currentWeaponIndex = inventory.length-1; currentWeaponDef = WEAPONS.find(w=>w.id===inventory[currentWeaponIndex]); updateWeaponBar(); }
+      else { spawnCrate(player.x + rand(-30,30), player.y + rand(-30,30), wep); }
+      return;
+    }
+  }
+}
+
+/* ========= Drawing helpers ========= */
+function drawPlayerWeaponModel(){
+  const w = currentWeaponDef;
+  const world = screenToWorld(mouse.x, mouse.y);
+  const ang = Math.atan2(world.y - player.y, world.x - player.x);
+  ctx.save(); ctx.translate(player.x, player.y); ctx.rotate(ang);
+  ctx.fillStyle = '#222'; ctx.fillRect(18, -6, 42, 12);
+  if(w && w.banana){ ctx.strokeStyle='gold'; ctx.lineWidth=4; ctx.beginPath(); ctx.arc(56,0,8,Math.PI*0.6,Math.PI*1.4); ctx.stroke(); }
+  else if(w && w.flame){ ctx.fillStyle='#444'; ctx.fillRect(18,-6,48,12); ctx.fillStyle='#b33'; ctx.fillRect(48,-4,10,8); }
+  else { ctx.fillStyle='#111'; ctx.fillRect(18,-6,36,12); }
+  ctx.restore();
+}
+function drawStahlhelm(cx, cy, size, color){
+  ctx.save(); ctx.translate(cx, cy);
+  ctx.fillStyle = color || '#444'; ctx.beginPath(); ctx.ellipse(0, 0, size, size*0.55, 0, Math.PI*0.6, Math.PI*0.4, true); ctx.fill();
+  ctx.fillStyle = shadeColor(color || '#444', -12); ctx.beginPath(); ctx.ellipse(0, size*0.18, size*1.05, size*0.28, 0, 0, Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+function shadeColor(col, percent){ try{ const ctx2=document.createElement('canvas').getContext('2d'); ctx2.fillStyle = col; const c = ctx2.fillStyle; if(c.startsWith('rgb')){ const nums = c.match(/\d+/g).map(n=>parseInt(n)); const r = clamp(Math.floor(nums[0]*(100+percent)/100),0,255); const g = clamp(Math.floor(nums[1]*(100+percent)/100),0,255); const b = clamp(Math.floor(nums[2]*(100+percent)/100),0,255); return `rgb(${r},${g},${b})`; } let hex = c.replace('#',''); if(hex.length===3) hex=hex.split('').map(h=>h+h).join(''); const num=parseInt(hex,16); let r=((num>>16)&255)+Math.floor((percent/100)*255); let g=((num>>8)&255)+Math.floor((percent/100)*255); let b=(num&255)+Math.floor((percent/100)*255); r=clamp(r,0,255); g=clamp(g,0,255); b=clamp(b,0,255); return '#'+r.toString(16).padStart(2,'0')+g.toString(16).padStart(2,'0')+b.toString(16).padStart(2,'0'); }catch(e){return col;} }
+
+/* ========= Main loop ========= */
+let lastFrame = now();
+function mainLoop(){
+  const t = now();
+  const dt = t - lastFrame; lastFrame = t;
+  if(running) update(dt);
+  draw();
+  requestAnimationFrame(mainLoop);
+}
+mainLoop();
+
+/* ========= Weapon bar UI ========= */
+function updateWeaponBar(){
+  weaponBar.innerHTML = '';
+  for(let i=0;i<inventory.length;i++){
+    const id = inventory[i];
+    const def = WEAPONS.find(w=>w.id===id) || { icon:'❓', id };
+    const slot = document.createElement('div'); slot.className = 'slot' + (i===currentWeaponIndex ? ' active' : '');
+    slot.innerHTML = `<div style="width:40px;height:36px;border-radius:8px;background:rgba(255,255,255,0.03);display:flex;align-items:center;justify-content:center">${def.icon}</div><div style="min-width:60px">${def.id}</div>`;
+    slot.onclick = ()=>{ currentWeaponIndex = i; currentWeaponDef = WEAPONS.find(w=>w.id===inventory[currentWeaponIndex]) || currentWeaponDef; updateWeaponBar(); };
+    weaponBar.appendChild(slot);
+  }
+  for(let s=inventory.length; s<6; s++){
+    const slot = document.createElement('div'); slot.className='slot locked'; slot.innerHTML = `<div style="width:40px;height:36px;border-radius:8px;background:rgba(255,255,255,0.03);display:flex;align-items:center;justify-content:center">+</div><div>Empty</div>`;
+    weaponBar.appendChild(slot);
+  }
+}
+
+/* ========= Delete current weapon (Y) ========= */
+function deleteCurrentWeapon(){
+  if(inventory.length === 0) return;
+  const cur = inventory[currentWeaponIndex];
+  if(!cur || cur.toLowerCase() === 'pistol'){ beep(320,0.06,0.04); return; } // protect pistol
+  inventory.splice(currentWeaponIndex,1);
+  if(currentWeaponIndex >= inventory.length) currentWeaponIndex = Math.max(0, inventory.length-1);
+  currentWeaponDef = WEAPONS.find(w=>w.id===inventory[currentWeaponIndex]) || WEAPONS[0];
+  updateWeaponBar(); beep(520,0.06,0.07);
+}
+deleteBtn.addEventListener('click', deleteCurrentWeapon);
+
+/* ========= Start/Restart/Game Over ========= */
+function startGame(){
+  started = true; running = true;
+  player.x = MAP_W/2; player.y = MAP_H/2; player.lives = player.maxLives;
+  wave = 1; highestWave = 1;
+  spawnScenery(); spawnWave(wave); updateWeaponBar();
+  beep(880,0.08,0.08);
+}
+restartBtn.addEventListener('click', ()=>{
+  gameOverUI.classList.remove('show'); gameOverUI.style.visibility='hidden';
+  player.x = MAP_W/2; player.y = MAP_H/2; player.lives = player.maxLives;
+  bullets=[]; enemyBullets=[]; enemies=[]; crates=[]; healthPacks=[]; explosions=[];
+  wave = 1; highestWave = 1; inventory = ["Pistol"]; currentWeaponIndex = 0; currentWeaponDef = WEAPONS.find(w=>w.id==='Pistol'); updateWeaponBar();
+  spawnScenery(); spawnWave(wave); running = true;
+});
+function showGameOver(){ gameOverText.innerText = `You reached Wave ${highestWave}`; gameOverUI.classList.add('show'); gameOverUI.style.visibility='visible'; running = false; }
+
+/* ========= Quiz system ========= */
+const QUESTIONS = [
+  { q:"Which of the following best describes archaeology?", a:["The study of dinosaurs","The study of human history through material remains","The study of ancient weather patterns","The study of languages"], correct:1 },
+  { q:"What tool is most commonly associated with excavating delicate artifacts?", a:["Pickaxe","Trowel","Hammer","Shovel"], correct:1 },
+  { q:"What is stratigraphy in archaeology?", a:["The study of rock layers and how they relate to time","A type of artifact labeling","A method of dating using tree rings","A map-making process"], correct:0 },
+  { q:"Which material is least likely to survive burial?", a:["Pottery","Metal","Wood","Stone"], correct:2 },
+  { q:"What is a midden?", a:["An ancient marketplace","A refuse heap or trash pit","A burial mound","A temple ruin"], correct:1 },
+  { q:"The term 'in situ' means:", a:["Out of place","Broken beyond repair","Found in its original location","Artificially reconstructed"], correct:2 },
+  { q:"Modern tech that sees through forests and ground cover?", a:["LiDAR","Sonar","Infrared","X-ray"], correct:0 },
+  { q:"Which is NOT a common dating method?", a:["Radiocarbon","Thermoluminescence","Dendrochronology","Magnetic compass dating"], correct:3 },
+  { q:"What is an artifact?", a:["A naturally occurring rock","A plant fossil","A human-made object","An animal bone"], correct:2 },
+  { q:"Who's called 'Father of Modern Archaeology'?", a:["Howard Carter","Heinrich Schliemann","Sir Flinders Petrie","Lord Carnarvon"], correct:2 },
+  { q:"Artifact vs ecofact: main difference?", a:["Artifacts are man-made, ecofacts natural","Ecofacts are smaller","Artifacts found only in caves","Ecofacts are tools"], correct:0 },
+  { q:"Common tool to clean artifacts on-site?", a:["Paintbrush","Toothbrush","Feather duster","Wire brush"], correct:1 },
+  { q:"What is experimental archaeology?", a:["Recreating ancient techniques","Testing radioactive dating","Excavating dangerous sites","Using drones"], correct:0 },
+  { q:"Why use a grid system during excavation?", a:["Looks organized","Records artifact locations precisely","Improves cleaning","Helps tourists"], correct:1 },
+  { q:"What is a feature (not artifact)?", a:["Broken pot","Stone foundation","Bronze knife","Clay figurine"], correct:1 },
+  { q:"Dating organic materials uses?", a:["Radiocarbon","Dendrochronology","Thermoluminescence","Both A and B"], correct:3 },
+  { q:"Who analyzes ancient pollen?", a:["Paleobotanist","Zoologist","Chemist","Physicist"], correct:0 },
+  { q:"Artifact 'context' refers to:", a:["Size and shape","Where and how it was found","Color","Estimated age only"], correct:1 },
+  { q:"Underwater archaeology needs?", a:["Rock climbing","SCUBA diving","Rope making","Desert navigation"], correct:1 },
+  { q:"Which site shows daily life rather than monuments?", a:["Palaces","Temples","Villages","Burial sites"], correct:2 },
+  { q:"What is a survey in archaeology?", a:["Counting artifacts","Mapping before digging","Interviewing locals","Testing composition"], correct:1 },
+  { q:"What does 'BP' mean?", a:["Before the Pharaohs","Before Present","Beyond Provenance","Burial Point"], correct:1 },
+  { q:"What is provenance?", a:["Preservation process","Origin/source of artifact","Storage technique","Cleaning method"], correct:1 },
+  { q:"What is flotation used for?", a:["Separate soil from seeds","Test water","Find pottery in rivers","Clean tools"], correct:0 },
+  { q:"Tech to identify underground structures?", a:["GPR","Radiocarbon scanner","Tectonic mapper","GPS imaging"], correct:0 },
+  { q:"Study of human remains called?", a:["Osteology","Ecology","Geology","Anthropology"], correct:0 },
+  { q:"Purpose of conservation?", a:["Rebuild structures","Prevent decay","Sell to museums","Re-excavate"], correct:1 },
+  { q:"Zooarchaeology studies?", a:["Coins","Animal bones","Pottery","Paintings"], correct:1 },
+  { q:"Typology helps to?", a:["Classify artifacts","Find new sites","Test soil","Clean artifacts"], correct:0 },
+  { q:"Remote sensing collects?", a:["Sound waves","Images from above","Soil chemistry","Air temperature"], correct:1 },
+  { q:"What's a tell/tel?", a:["Mound of occupation","Stone tool","Burial chamber","Cave"], correct:0 },
+  { q:"Who studies microscopic wear of tools?", a:["Lithic analysis","Use-wear analysis","Experimental archaeology","Metallurgy"], correct:1 },
+  { q:"Archaeometallurgist studies?", a:["Pottery","Metal objects","Bones","Plants"], correct:1 },
+  { q:"Posthole evidence shows?", a:["Where wooden posts once stood","Animal burrows","Tunnels","Pottery making"], correct:0 },
+  { q:"Best environment to preserve organics?", a:["Hot/dry","Wet/muddy","Cold/dry","Acidic/tropical"], correct:2 },
+  { q:"Map to record layers is?", a:["Stratigraphic profile","Grid layout","Topographic chart","Elevation map"], correct:0 },
+  { q:"'Pompeii Premise' refers to?", a:["Artifacts preserved as left","Cities all similar","Volcanoes ideal","Artifacts accidental"], correct:0 },
+  { q:"First step before excavation?", a:["Dig test pits","Research and surveys","Catalog artifacts","Hire volunteers"], correct:1 },
+  { q:"Greatest challenge of archaeology?", a:["Weather","Preserving context","Equipment cost","Travel"], correct:1 },
+  { q:"Archaeology vs paleontology?", a:["Archaeology studies humans; paleontology studies prehistoric life","Paleontology older","Archaeology uses more chemistry","Same"], correct:0 },
+  { q:"Which can be an artifact?", a:["Fossil bone","Chipped stone blade","Mineral deposit","Footprint"], correct:1 },
+  { q:"What is 'context loss'?", a:["Artifact context disturbed","Labeling unclear","Soil mixed","Excavation unfinished"], correct:0 },
+  { q:"Modern branch of archaeology?", a:["Space archaeology","Steam archaeology","Planetary geology","Sky mapping"], correct:0 },
+  { q:"What is 'rescue archaeology'?", a:["Recovering from disaster","Salvaging before construction","Saving broken tools","Excavating ships"], correct:1 },
+  { q:"Time before written records called?", a:["Prehistoric","Historic","Classical","Modern"], correct:0 },
+  { q:"What is a faunal assemblage?", a:["Collection of animal remains","Group of tools","Pottery kiln","Stone carvings"], correct:0 },
+  { q:"Which branch focuses on recent history?", a:["Contemporary archaeology","Urban archaeology","Industrial archaeology","Historical archaeology"], correct:0 },
+  { q:"Site taphonomy studies?", a:["Natural processes after deposition","Burial rituals","DNA","Symbolic art"], correct:0 },
+  { q:"Modern tool to reconstruct sites?", a:["3D modeling","Shovel test pits","Aerial kites","Carbon scanners"], correct:0 },
+  { q:"Why is public outreach important?", a:["Prevents looting & raises awareness","Raises money","Promotes competition","Helps archaeologists retire"], correct:0 }
+];
+
+let quizPool = [], quizCurrent = null, quizCorrect = 0;
+function startQuiz(){
+  quizActive = true; pausedForQuiz = true; quizCorrect = 0; quizPool = QUESTIONS.slice();
+  quizOverlay.classList.add('show'); quizOverlay.style.visibility = 'visible';
+  showNextQuiz();
+}
+function endQuiz(){ quizActive = false; pausedForQuiz = false; quizOverlay.classList.remove('show'); quizOverlay.style.visibility = 'hidden'; }
+function pickQuestion(){ if(quizPool.length === 0) quizPool = QUESTIONS.slice(); const idx = Math.floor(Math.random() * quizPool.length); return quizPool.splice(idx,1)[0]; }
+function showNextQuiz(){ quizCurrent = pickQuestion(); qText.innerText = quizCurrent.q; answersDiv.innerHTML = ''; quizCorrectEl.innerText = quizCorrect; for(let i=0;i<4;i++){ const btn = document.createElement('div'); btn.className='qAns'; btn.dataset.idx=i; btn.innerHTML = `<strong>${String.fromCharCode(65+i)}.</strong> ${quizCurrent.a[i]}`; btn.onclick = ()=> handleQuiz(i, btn); answersDiv.appendChild(btn); } }
+function handleQuiz(choice, btn){
+  if(!quizActive) return;
+  const ok = choice === quizCurrent.correct;
+  if(ok){ btn.classList.add('correct'); quizCorrect++; beep(1200,0.08,0.08); setTimeout(()=>{ if(quizCorrect >= 2){ endQuiz(); } else showNextQuiz(); }, 600); }
+  else { btn.classList.add('wrong'); beep(320,0.08,0.06); setTimeout(()=> showNextQuiz(), 700); }
+}
+
+/* ========= crate click (map) handled in handleCrateClick above ========= */
+
+/* ========= quick select and developer unlock ========= */
+window.addEventListener('keydown', (e)=>{
+  const k = e.key;
+  if(k >= '1' && k <= '6'){ const idx = parseInt(k)-1; if(idx < inventory.length){ currentWeaponIndex = idx; currentWeaponDef = WEAPONS.find(w=>w.id===inventory[currentWeaponIndex]) || currentWeaponDef; updateWeaponBar(); } }
+  if(k.toLowerCase() === 'u'){ for(const w of WEAPONS){ if(!inventory.includes(w.id)){ if(inventory.length < 6) inventory.push(w.id); else spawnCrate(player.x + rand(-40,40), player.y + rand(-40,40), w.id); } } updateWeaponBar(); }
+});
+
+/* ========= Initialization ========= */
+spawnScenery(); spawnWave(wave); updateWeaponBar();
+
+/* ========= Helper: show gameover and restart ========= */
+function showGameOver(){ gameOverText.innerText = `You reached Wave ${highestWave}`; gameOverUI.classList.add('show'); gameOverUI.style.visibility='visible'; running = false; }
+restartBtn.addEventListener('click', ()=>{
+  gameOverUI.classList.remove('show'); gameOverUI.style.visibility='hidden';
+  player.x = MAP_W/2; player.y = MAP_H/2; player.lives = player.maxLives;
+  bullets=[]; enemyBullets=[]; enemies=[]; crates=[]; healthPacks=[]; explosions=[];
+  wave = 1; highestWave = 1; inventory = ["Pistol"]; currentWeaponIndex = 0; currentWeaponDef = WEAPONS.find(w=>w.id==='Pistol'); updateWeaponBar();
+  spawnScenery(); spawnWave(wave); running = true;
+});
+
+/* ========= Expose tiny debug helper ========= */
+window._game = { startQuiz, QUESTIONS };
+
+/* End of script */
+</script>
+</body>
+</html>
